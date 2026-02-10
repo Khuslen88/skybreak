@@ -6,7 +6,7 @@
     <title>Skybreak</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
-        body { background: #111; overflow: hidden; }
+        body { background: #87CEEB; overflow: hidden; }
         canvas { display: block; }
     </style>
 </head>
@@ -20,9 +20,13 @@
         canvas.height = window.innerHeight;
 
         // Game code will be built in feature branches
-        ctx.fillStyle = '#222';
+        // Sky gradient background
+        const gradient = ctx.createLinearGradient(0, 0, 0, canvas.height);
+        gradient.addColorStop(0, '#4A90D9');
+        gradient.addColorStop(1, '#87CEEB');
+        ctx.fillStyle = gradient;
         ctx.fillRect(0, 0, canvas.width, canvas.height);
-        ctx.fillStyle = '#fff';
+        ctx.fillStyle = '#1a1a2e';
         ctx.font = '48px monospace';
         ctx.textAlign = 'center';
         ctx.fillText('SKYBREAK', canvas.width / 2, canvas.height / 2);
