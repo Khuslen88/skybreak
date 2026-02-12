@@ -14,7 +14,7 @@
     <canvas id="game"></canvas>
     <script>
     // ============================================================
-    //  SKYBREAK — Core Engine + Advanced Movement
+    //  SKYBREAK — Full Game
     // ============================================================
 
     const canvas = document.getElementById('game');
@@ -26,6 +26,13 @@
     }
     resizeCanvas();
     window.addEventListener('resize', resizeCanvas);
+
+    // ── Game State ──────────────────────────────────────────────
+    let gameState = 'playing'; // playing, victory, gameover
+    let currentArea = 'ground'; // ground, underground, sky
+    let screenFlash = 0;
+    let transitionTimer = 0;
+    let transitionTarget = null;
 
     // ── Input Handler ───────────────────────────────────────────
     const keys = {};
@@ -40,70 +47,48 @@
         e.preventDefault();
     });
 
-    function isLeft()  { return keys['ArrowLeft']  || keys['KeyA']; }
-    function isRight() { return keys['ArrowRight'] || keys['KeyD']; }
-    function isJump()  { return keys['ArrowUp']    || keys['KeyW'] || keys['Space']; }
-    function isDash()  { return keys['ShiftLeft']   || keys['ShiftRight'] || keys['KeyJ']; }
+    function isLeft()   { return keys['ArrowLeft']  || keys['KeyA']; }
+    function isRight()  { return keys['ArrowRight'] || keys['KeyD']; }
+    function isJump()   { return keys['ArrowUp']    || keys['KeyW'] || keys['Space']; }
+    function isDown()   { return keys['ArrowDown']  || keys['KeyS']; }
+    function isAttack() { return keys['KeyK'] || keys['KeyZ']; }
+    function isShoot()  { return keys['KeyL'] || keys['KeyX']; }
 
-    function consumeJump() {
-        const pressed = justPressed['ArrowUp'] || justPressed['KeyW'] || justPressed['Space'];
-        justPressed['ArrowUp'] = false;
-        justPressed['KeyW'] = false;
-        justPressed['Space'] = false;
-        return pressed;
+    function consumeKey(codes) {
+        for (const c of codes) {
+            if (justPressed[c]) { justPressed[c] = false; return true; }
+        }
+        return false;
     }
+    function consumeJump()   { return consumeKey(['ArrowUp','KeyW','Space']); }
+    function consumeDash()   { return consumeKey(['ShiftLeft','ShiftRight','KeyJ']); }
+    function consumeAttack() { return consumeKey(['KeyK','KeyZ']); }
+    function consumeShoot()  { return consumeKey(['KeyL','KeyX']); }
 
-    function consumeDash() {
-        const pressed = justPressed['ShiftLeft'] || justPressed['ShiftRight'] || justPressed['KeyJ'];
-        justPressed['ShiftLeft'] = false;
-        justPressed['ShiftRight'] = false;
-        justPressed['KeyJ'] = false;
-        return pressed;
-    }
-
-    // ── Player Physics ────────────────────────────────────────────
+    // ── Physics Constants ───────────────────────────────────────
     const PHYSICS = {
-        GRAVITY:        0.85,
-        JUMP_FORCE:    -14,
-        MOVE_SPEED:     1.0,
-        MAX_SPEED_X:    7,
-        FRICTION:       0.88,
-        PLAYER_W:       28,
-        PLAYER_H:       40,
-
-        // Advanced movement
-        WALL_SLIDE_SPEED:  2.5,
-        WALL_JUMP_FORCE_X: 8,
-        WALL_JUMP_FORCE_Y: -13,
-        DASH_SPEED:        18,
-        DASH_DURATION:     8,
-        DASH_COOLDOWN:     45,
-        MAX_JUMPS:         2,
+        GRAVITY: 0.85, JUMP_FORCE: -14, MOVE_SPEED: 1.0,
+        MAX_SPEED_X: 7, FRICTION: 0.88, PLAYER_W: 28, PLAYER_H: 40,
+        WALL_SLIDE_SPEED: 2.5, WALL_JUMP_FORCE_X: 8, WALL_JUMP_FORCE_Y: -13,
+        DASH_SPEED: 18, DASH_DURATION: 8, DASH_COOLDOWN: 45, MAX_JUMPS: 2,
     };
 
     // ── Player ──────────────────────────────────────────────────
     const player = {
-        x: 200,
-        y: 200,
-        vx: 0,
-        vy: 0,
-        w: PHYSICS.PLAYER_W,
-        h: PHYSICS.PLAYER_H,
-        onGround: false,
-        facing: 1,
-
-        // Advanced movement state
-        jumpCount: 0,
-        onWall: 0,       // -1 = wall on left, 1 = wall on right, 0 = no wall
-        wallSliding: false,
-        dashTimer: 0,
-        dashCooldown: 0,
-        dashDir: 0,
+        x: 200, y: 400, vx: 0, vy: 0,
+        w: PHYSICS.PLAYER_W, h: PHYSICS.PLAYER_H,
+        onGround: false, facing: 1,
+        jumpCount: 0, onWall: 0, wallSliding: false,
+        dashTimer: 0, dashCooldown: 0, dashDir: 0,
+        // Combat
+        hp: 5, maxHp: 5, invincible: 0,
+        attackTimer: 0, attackCooldown: 0,
+        // Collectibles
+        coins: 0, keysHeld: 0, hasSkyShard: false,
     };
 
     // ── Particle System ─────────────────────────────────────────
     const particles = [];
-
     function spawnParticles(x, y, count, color, spread, speed) {
         for (let i = 0; i < count; i++) {
             particles.push({
@@ -113,225 +98,522 @@
                 vy: (Math.random() - 0.5) * speed - 1,
                 life: 20 + Math.random() * 20,
                 maxLife: 20 + Math.random() * 20,
-                size: 2 + Math.random() * 3,
-                color: color,
+                size: 2 + Math.random() * 3, color,
             });
         }
     }
-
     function updateParticles() {
         for (let i = particles.length - 1; i >= 0; i--) {
             const p = particles[i];
-            p.x += p.vx;
-            p.y += p.vy;
-            p.vy += 0.05;
-            p.life--;
+            p.x += p.vx; p.y += p.vy; p.vy += 0.05; p.life--;
             if (p.life <= 0) particles.splice(i, 1);
         }
     }
-
     function drawParticles() {
         for (const p of particles) {
-            const alpha = p.life / p.maxLife;
-            ctx.globalAlpha = alpha;
+            ctx.globalAlpha = p.life / p.maxLife;
             ctx.fillStyle = p.color;
             ctx.fillRect(p.x - camera.x, p.y - camera.y, p.size, p.size);
         }
         ctx.globalAlpha = 1;
     }
 
-    // ── Platforms / Level ───────────────────────────────────────
-    const platforms = [
-        // Ground
-        { x: -500, y: 500, w: 4000, h: 60, color: '#4a7c3f' },
-        // Grass top layer
-        { x: -500, y: 492, w: 4000, h: 12, color: '#6abf4b' },
+    // ── Projectiles ─────────────────────────────────────────────
+    const projectiles = [];
+    function spawnProjectile(x, y, dir, fromPlayer) {
+        projectiles.push({ x, y, vx: dir * 10, w: 10, h: 4, life: 60, fromPlayer });
+    }
+    function updateProjectiles() {
+        for (let i = projectiles.length - 1; i >= 0; i--) {
+            const p = projectiles[i];
+            p.x += p.vx; p.life--;
+            if (p.life <= 0) { projectiles.splice(i, 1); continue; }
+            // Hit enemies
+            if (p.fromPlayer) {
+                for (let j = enemies.length - 1; j >= 0; j--) {
+                    if (rectOverlap(p, enemies[j])) {
+                        damageEnemy(j, 1);
+                        projectiles.splice(i, 1); break;
+                    }
+                }
+            } else {
+                if (rectOverlap(p, player)) {
+                    damagePlayer(1);
+                    projectiles.splice(i, 1);
+                }
+            }
+        }
+    }
+    function drawProjectiles() {
+        for (const p of projectiles) {
+            ctx.fillStyle = p.fromPlayer ? '#FFD700' : '#FF4444';
+            ctx.fillRect(p.x - camera.x, p.y - camera.y, p.w, p.h);
+        }
+    }
 
-        // Platforms to jump between
-        { x: 300,  y: 400, w: 120, h: 20, color: '#8B6914' },
-        { x: 500,  y: 320, w: 120, h: 20, color: '#8B6914' },
-        { x: 720,  y: 260, w: 150, h: 20, color: '#8B6914' },
-        { x: 950,  y: 320, w: 100, h: 20, color: '#8B6914' },
-        { x: 1100, y: 250, w: 140, h: 20, color: '#8B6914' },
+    // ── Enemies ─────────────────────────────────────────────────
+    let enemies = [];
+    function createEnemies() {
+        enemies = [
+            // Patrol enemies on ground
+            { type: 'patrol', x: 600, y: 452, w: 24, h: 36, vx: 1, hp: 2, maxHp: 2, dir: 1, minX: 500, maxX: 800, color: '#9B59B6', area: 'ground' },
+            { type: 'patrol', x: 1200, y: 452, w: 24, h: 36, vx: 1, hp: 2, maxHp: 2, dir: 1, minX: 1050, maxX: 1400, color: '#9B59B6', area: 'ground' },
+            { type: 'patrol', x: 2100, y: 452, w: 24, h: 36, vx: 1, hp: 2, maxHp: 2, dir: 1, minX: 2000, maxX: 2300, color: '#9B59B6', area: 'ground' },
+            // Chaser enemies
+            { type: 'chaser', x: 1800, y: 452, w: 26, h: 34, vx: 0, hp: 3, maxHp: 3, dir: 1, detectRange: 250, speed: 1.8, color: '#E74C3C', area: 'ground' },
+            { type: 'chaser', x: 2700, y: 452, w: 26, h: 34, vx: 0, hp: 3, maxHp: 3, dir: 1, detectRange: 250, speed: 1.8, color: '#E74C3C', area: 'ground' },
+            // Underground enemies
+            { type: 'patrol', x: -200, y: 702, w: 24, h: 36, vx: 1, hp: 2, maxHp: 2, dir: 1, minX: -350, maxX: 0, color: '#8E44AD', area: 'underground' },
+            { type: 'chaser', x: 300, y: 702, w: 26, h: 34, vx: 0, hp: 3, maxHp: 3, dir: 1, detectRange: 200, speed: 2.0, color: '#C0392B', area: 'underground' },
+            // Sky enemies
+            { type: 'patrol', x: 500, y: -548, w: 24, h: 36, vx: 1.5, hp: 2, maxHp: 2, dir: 1, minX: 400, maxX: 700, color: '#5DADE2', area: 'sky' },
+            { type: 'patrol', x: 900, y: -648, w: 24, h: 36, vx: 1.5, hp: 2, maxHp: 2, dir: 1, minX: 800, maxX: 1100, color: '#5DADE2', area: 'sky' },
+            { type: 'chaser', x: 1400, y: -548, w: 26, h: 34, vx: 0, hp: 3, maxHp: 3, dir: 1, detectRange: 300, speed: 2.2, color: '#2E86C1', area: 'sky' },
+        ];
+    }
 
-        // Higher platforms
-        { x: 1300, y: 180, w: 100, h: 20, color: '#8B6914' },
-        { x: 1500, y: 130, w: 160, h: 20, color: '#8B6914' },
-        { x: 1750, y: 200, w: 120, h: 20, color: '#8B6914' },
+    // Boss
+    let boss = null;
+    function createBoss() {
+        boss = {
+            x: 3700, y: 410, w: 56, h: 70, hp: 15, maxHp: 15,
+            vx: 0, dir: -1, phase: 0, timer: 0,
+            attackTimer: 0, color: '#8B0000', active: false, defeated: false,
+        };
+    }
 
+    function updateEnemies() {
+        for (let i = enemies.length - 1; i >= 0; i--) {
+            const e = enemies[i];
+            if (e.type === 'patrol') {
+                e.x += e.vx * e.dir;
+                if (e.x <= e.minX || e.x + e.w >= e.maxX) e.dir *= -1;
+            } else if (e.type === 'chaser') {
+                const dx = player.x - e.x;
+                const dist = Math.abs(dx);
+                if (dist < e.detectRange) {
+                    e.dir = dx > 0 ? 1 : -1;
+                    e.vx += e.speed * 0.1 * e.dir;
+                    e.vx = Math.max(-e.speed, Math.min(e.speed, e.vx));
+                } else {
+                    e.vx *= 0.9;
+                }
+                e.x += e.vx;
+            }
+            // Contact damage
+            if (rectOverlap(e, player)) damagePlayer(1);
+        }
+    }
+
+    function updateBoss() {
+        if (!boss || boss.defeated) return;
+        // Activate when player is near
+        if (!boss.active) {
+            if (Math.abs(player.x - boss.x) < 400) boss.active = true;
+            else return;
+        }
+        boss.timer++;
+        boss.dir = player.x < boss.x ? -1 : 1;
+
+        // Phase based on HP
+        boss.phase = boss.hp > 10 ? 0 : boss.hp > 5 ? 1 : 2;
+        const attackRate = [90, 60, 40][boss.phase];
+
+        // Movement — chase player slowly
+        const dx = player.x - boss.x;
+        if (Math.abs(dx) > 60) boss.x += (dx > 0 ? 1.5 : -1.5) * (1 + boss.phase * 0.3);
+
+        // Attacks
+        if (boss.timer % attackRate === 0) {
+            boss.attackTimer = 15;
+            if (boss.phase < 2) {
+                spawnProjectile(boss.x + boss.w / 2, boss.y + 20, boss.dir, false);
+            } else {
+                // Phase 3: triple shot
+                spawnProjectile(boss.x + boss.w / 2, boss.y + 10, boss.dir, false);
+                spawnProjectile(boss.x + boss.w / 2, boss.y + 30, boss.dir, false);
+                spawnProjectile(boss.x + boss.w / 2, boss.y + 50, boss.dir, false);
+            }
+        }
+        // Contact damage
+        if (rectOverlap(boss, player)) damagePlayer(1);
+    }
+
+    function damageEnemy(idx, dmg) {
+        const e = enemies[idx];
+        e.hp -= dmg;
+        spawnParticles(e.x + e.w/2, e.y + e.h/2, 8, e.color, 10, 3);
+        if (e.hp <= 0) {
+            spawnParticles(e.x + e.w/2, e.y + e.h/2, 15, '#fff', 15, 4);
+            enemies.splice(idx, 1);
+        }
+    }
+
+    function damageBoss(dmg) {
+        if (!boss || boss.defeated) return;
+        boss.hp -= dmg;
+        spawnParticles(boss.x + boss.w/2, boss.y + boss.h/2, 10, '#FF6600', 15, 4);
+        screenFlash = 5;
+        if (boss.hp <= 0) {
+            boss.defeated = true;
+            spawnParticles(boss.x + boss.w/2, boss.y + boss.h/2, 40, '#FFD700', 30, 6);
+            spawnParticles(boss.x + boss.w/2, boss.y + boss.h/2, 20, '#FF4444', 25, 5);
+            // Drop lots of coins
+            for (let i = 0; i < 8; i++) {
+                coins.push({ x: boss.x + Math.random() * boss.w, y: boss.y - 10 - Math.random() * 40, w: 12, h: 12, collected: false, vy: -3 - Math.random()*3, settled: false });
+            }
+        }
+    }
+
+    function damagePlayer(dmg) {
+        if (player.invincible > 0 || player.dashTimer > 0) return;
+        player.hp -= dmg;
+        player.invincible = 60;
+        screenFlash = 8;
+        spawnParticles(player.x + player.w/2, player.y + player.h/2, 6, '#FF0000', 8, 2);
+        if (player.hp <= 0) {
+            player.hp = player.maxHp;
+            player.x = 200; player.y = 400;
+            player.vx = 0; player.vy = 0;
+            currentArea = 'ground';
+        }
+    }
+
+    function drawEnemies() {
+        for (const e of enemies) {
+            const sx = e.x - camera.x, sy = e.y - camera.y;
+            // Body
+            ctx.fillStyle = e.color;
+            ctx.fillRect(sx, sy, e.w, e.h);
+            // Eyes
+            const eyeX = e.dir === 1 ? sx + e.w - 8 : sx + 2;
+            ctx.fillStyle = '#fff';
+            ctx.fillRect(eyeX, sy + 6, 6, 6);
+            ctx.fillStyle = '#000';
+            ctx.fillRect(e.dir === 1 ? eyeX + 3 : eyeX, sy + 8, 3, 3);
+            // HP bar
+            if (e.hp < e.maxHp) {
+                ctx.fillStyle = '#333';
+                ctx.fillRect(sx, sy - 8, e.w, 4);
+                ctx.fillStyle = '#2ECC71';
+                ctx.fillRect(sx, sy - 8, e.w * (e.hp / e.maxHp), 4);
+            }
+        }
+    }
+
+    function drawBoss() {
+        if (!boss || boss.defeated) return;
+        const sx = boss.x - camera.x, sy = boss.y - camera.y;
+        // Body
+        ctx.fillStyle = boss.attackTimer > 0 ? '#FF2200' : boss.color;
+        ctx.fillRect(sx, sy, boss.w, boss.h);
+        // Horns
+        ctx.fillStyle = '#550000';
+        ctx.fillRect(sx + 5, sy - 12, 8, 14);
+        ctx.fillRect(sx + boss.w - 13, sy - 12, 8, 14);
+        // Eyes
+        ctx.fillStyle = '#FFD700';
+        ctx.fillRect(sx + 10, sy + 15, 10, 10);
+        ctx.fillRect(sx + boss.w - 20, sy + 15, 10, 10);
+        ctx.fillStyle = '#000';
+        ctx.fillRect(sx + 14, sy + 18, 4, 5);
+        ctx.fillRect(sx + boss.w - 16, sy + 18, 4, 5);
+        // HP bar (big, at top of screen)
+        if (boss.active) {
+            const barW = 300, barH = 16;
+            const bx = canvas.width/2 - barW/2, by = 50;
+            ctx.fillStyle = 'rgba(0,0,0,0.5)';
+            ctx.fillRect(bx - 2, by - 2, barW + 4, barH + 4);
+            ctx.fillStyle = '#333';
+            ctx.fillRect(bx, by, barW, barH);
+            const hpRatio = boss.hp / boss.maxHp;
+            ctx.fillStyle = hpRatio > 0.5 ? '#E74C3C' : hpRatio > 0.25 ? '#E67E22' : '#C0392B';
+            ctx.fillRect(bx, by, barW * hpRatio, barH);
+            ctx.fillStyle = '#fff';
+            ctx.font = 'bold 12px monospace';
+            ctx.textAlign = 'center';
+            ctx.fillText('GUARDIAN OF THE BREACH', canvas.width/2, by - 6);
+        }
+        if (boss.attackTimer > 0) boss.attackTimer--;
+    }
+
+    // ── Coins & Collectibles ────────────────────────────────────
+    let coins = [];
+    let totalCoins = 0;
+    const keyItems = [];
+    const doors = [];
+    let skyShard = null;
+    let breakableWalls = [];
+    let highScore = parseInt(localStorage.getItem('skybreak_highscore') || '0');
+    let challengeTimer = 0;
+    let challengeActive = false;
+    let challengeRoom = null;
+    let challengeComplete = false;
+
+    function createCollectibles() {
+        coins = [];
+        // Ground area coins
+        const groundCoinPositions = [
+            [350, 370], [400, 370], [550, 290], [600, 290],
+            [770, 230], [820, 230], [1000, 290], [1150, 220],
+            [1350, 150], [1550, 100], [1600, 100],
+            [2050, 320], [2100, 320], [2350, 250], [2400, 250],
+            [2650, 190], [2700, 190], [2750, 190],
+        ];
+        // Underground coins
+        const underCoinPositions = [
+            [-300, 670], [-200, 670], [-100, 670], [0, 670],
+            [200, 620], [400, 570], [500, 670],
+        ];
+        // Sky coins
+        const skyCoinPositions = [
+            [350, -560], [450, -610], [550, -560], [650, -610],
+            [850, -660], [950, -710], [1050, -660],
+            [1250, -610], [1350, -660], [1500, -560],
+        ];
+        const allPositions = [...groundCoinPositions, ...underCoinPositions, ...skyCoinPositions];
+        for (const [cx, cy] of allPositions) {
+            coins.push({ x: cx, y: cy, w: 12, h: 12, collected: false, vy: 0, settled: true });
+        }
+        totalCoins = coins.length;
+
+        // Keys
+        keyItems.length = 0;
+        keyItems.push({ x: 2850, y: 50, w: 16, h: 16, collected: false, id: 'underground' });
+        keyItems.push({ x: 1550, y: 90, w: 16, h: 16, collected: false, id: 'boss' });
+
+        // Doors
+        doors.length = 0;
+        doors.push({ x: -50, y: 462, w: 30, h: 30, keyId: 'underground', open: false });
+        doors.push({ x: 3550, y: 452, w: 30, h: 40, keyId: 'boss', open: false });
+
+        // Sky shard (triggers sky world)
+        skyShard = { x: 1700, y: 160, w: 20, h: 20, collected: false };
+
+        // Breakable walls
+        breakableWalls = [
+            { x: 280, y: 462, w: 20, h: 30, hp: 3, color: '#9E8B6E', area: 'ground' },
+            { x: -370, y: 692, w: 20, h: 40, hp: 3, color: '#6B5A4E', area: 'underground' },
+        ];
+
+        // Challenge room trigger
+        challengeRoom = { x: 3150, y: 370, w: 30, h: 30, area: 'ground' };
+    }
+
+    // ── Level Design ────────────────────────────────────────────
+    const platforms = [];
+    function createLevel() {
+        platforms.length = 0;
+        // ── GROUND AREA ─────────────────────────────────
+        platforms.push({ x: -500, y: 492, w: 4200, h: 12, color: '#6abf4b', area: 'ground' });
+        platforms.push({ x: -500, y: 500, w: 4200, h: 60, color: '#4a7c3f', area: 'ground' });
+        // Platforms
+        platforms.push({ x: 300, y: 400, w: 120, h: 20, color: '#8B6914', area: 'ground' });
+        platforms.push({ x: 500, y: 320, w: 120, h: 20, color: '#8B6914', area: 'ground' });
+        platforms.push({ x: 720, y: 260, w: 150, h: 20, color: '#8B6914', area: 'ground' });
+        platforms.push({ x: 950, y: 320, w: 100, h: 20, color: '#8B6914', area: 'ground' });
+        platforms.push({ x: 1100, y: 250, w: 140, h: 20, color: '#8B6914', area: 'ground' });
+        platforms.push({ x: 1300, y: 180, w: 100, h: 20, color: '#8B6914', area: 'ground' });
+        platforms.push({ x: 1500, y: 130, w: 160, h: 20, color: '#8B6914', area: 'ground' });
+        platforms.push({ x: 1750, y: 200, w: 120, h: 20, color: '#8B6914', area: 'ground' });
         // Floating islands
-        { x: 2000, y: 350, w: 200, h: 30, color: '#6abf4b' },
-        { x: 2300, y: 280, w: 180, h: 30, color: '#6abf4b' },
-        { x: 2600, y: 220, w: 220, h: 30, color: '#6abf4b' },
-
-        // Tall walls for wall-jump testing
-        { x: 1900, y: 200, w: 30, h: 300, color: '#7a7a7a' },
-        { x: 2050, y: 150, w: 30, h: 350, color: '#7a7a7a' },
-
+        platforms.push({ x: 2000, y: 350, w: 200, h: 30, color: '#6abf4b', area: 'ground' });
+        platforms.push({ x: 2300, y: 280, w: 180, h: 30, color: '#6abf4b', area: 'ground' });
+        platforms.push({ x: 2600, y: 220, w: 220, h: 30, color: '#6abf4b', area: 'ground' });
+        // Walls
+        platforms.push({ x: 1900, y: 200, w: 30, h: 300, color: '#7a7a7a', area: 'ground' });
+        platforms.push({ x: 2050, y: 150, w: 30, h: 350, color: '#7a7a7a', area: 'ground' });
         // Wall-jump corridor
-        { x: 2800, y: 100, w: 30, h: 400, color: '#7a7a7a' },
-        { x: 2920, y: 100, w: 30, h: 400, color: '#7a7a7a' },
-        // Reward platform at top of corridor
-        { x: 2790, y: 80, w: 170, h: 20, color: '#D4AF37' },
+        platforms.push({ x: 2800, y: 100, w: 30, h: 400, color: '#7a7a7a', area: 'ground' });
+        platforms.push({ x: 2920, y: 100, w: 30, h: 400, color: '#7a7a7a', area: 'ground' });
+        platforms.push({ x: 2790, y: 80, w: 170, h: 20, color: '#D4AF37', area: 'ground' });
+        // Dash gap
+        platforms.push({ x: 3100, y: 400, w: 120, h: 20, color: '#8B6914', area: 'ground' });
+        platforms.push({ x: 3400, y: 400, w: 120, h: 20, color: '#8B6914', area: 'ground' });
+        // Boss arena
+        platforms.push({ x: 3550, y: 492, w: 500, h: 12, color: '#8B4513', area: 'ground' });
+        platforms.push({ x: 3550, y: 500, w: 500, h: 60, color: '#6B3410', area: 'ground' });
+        platforms.push({ x: 3540, y: 200, w: 20, h: 300, color: '#555', area: 'ground' }); // left wall
+        platforms.push({ x: 4040, y: 200, w: 20, h: 300, color: '#555', area: 'ground' }); // right wall
+        // Arena platforms
+        platforms.push({ x: 3620, y: 380, w: 80, h: 15, color: '#8B6914', area: 'ground' });
+        platforms.push({ x: 3800, y: 320, w: 80, h: 15, color: '#8B6914', area: 'ground' });
+        platforms.push({ x: 3950, y: 380, w: 80, h: 15, color: '#8B6914', area: 'ground' });
 
-        // Dash gap challenge
-        { x: 3100, y: 400, w: 120, h: 20, color: '#8B6914' },
-        { x: 3400, y: 400, w: 120, h: 20, color: '#8B6914' },
-    ];
+        // ── UNDERGROUND AREA ────────────────────────────
+        platforms.push({ x: -400, y: 730, w: 1000, h: 12, color: '#5A4A3E', area: 'underground' });
+        platforms.push({ x: -400, y: 740, w: 1000, h: 60, color: '#4A3A2E', area: 'underground' });
+        // Underground entrance (stairs from door)
+        platforms.push({ x: -50, y: 520, w: 60, h: 20, color: '#6B5A4E', area: 'underground' });
+        platforms.push({ x: -80, y: 570, w: 60, h: 20, color: '#6B5A4E', area: 'underground' });
+        platforms.push({ x: -110, y: 620, w: 60, h: 20, color: '#6B5A4E', area: 'underground' });
+        platforms.push({ x: -140, y: 670, w: 60, h: 20, color: '#6B5A4E', area: 'underground' });
+        // Underground platforms
+        platforms.push({ x: 100, y: 650, w: 100, h: 20, color: '#6B5A4E', area: 'underground' });
+        platforms.push({ x: 300, y: 600, w: 120, h: 20, color: '#6B5A4E', area: 'underground' });
+        platforms.push({ x: 450, y: 680, w: 100, h: 20, color: '#6B5A4E', area: 'underground' });
+        // Underground ceiling
+        platforms.push({ x: -400, y: 500, w: 1000, h: 20, color: '#3A2A1E', area: 'underground' });
+
+        // ── SKY AREA ────────────────────────────────────
+        platforms.push({ x: 200, y: -500, w: 200, h: 25, color: '#B8D4E8', area: 'sky' });
+        platforms.push({ x: 500, y: -550, w: 150, h: 20, color: '#A8C4D8', area: 'sky' });
+        platforms.push({ x: 750, y: -600, w: 180, h: 20, color: '#B8D4E8', area: 'sky' });
+        platforms.push({ x: 1000, y: -650, w: 160, h: 20, color: '#A8C4D8', area: 'sky' });
+        platforms.push({ x: 1250, y: -600, w: 200, h: 25, color: '#B8D4E8', area: 'sky' });
+        platforms.push({ x: 1500, y: -550, w: 180, h: 20, color: '#A8C4D8', area: 'sky' });
+        // Sky walls for wall jumping
+        platforms.push({ x: 700, y: -700, w: 25, h: 120, color: '#C8D8E8', area: 'sky' });
+        platforms.push({ x: 820, y: -700, w: 25, h: 120, color: '#C8D8E8', area: 'sky' });
+        // Sky goal platform
+        platforms.push({ x: 1600, y: -700, w: 200, h: 25, color: '#FFD700', area: 'sky' });
+    }
 
     // ── Camera ──────────────────────────────────────────────────
-    const camera = {
-        x: 0,
-        y: 0,
-        smoothing: 0.08,
-    };
-
+    const camera = { x: 0, y: 0, smoothing: 0.08 };
     function updateCamera() {
         const targetX = player.x + player.w / 2 - canvas.width / 2;
         const targetY = player.y + player.h / 2 - canvas.height / 2 + 50;
-
         camera.x += (targetX - camera.x) * camera.smoothing;
         camera.y += (targetY - camera.y) * camera.smoothing;
     }
 
     // ── Collision Detection ─────────────────────────────────────
     function rectOverlap(a, b) {
-        return a.x < b.x + b.w &&
-               a.x + a.w > b.x &&
-               a.y < b.y + b.h &&
-               a.y + a.h > b.y;
+        return a.x < b.x + b.w && a.x + a.w > b.x &&
+               a.y < b.y + b.h && a.y + a.h > b.y;
     }
 
     function checkWallContact() {
         player.onWall = 0;
-        const wallProbe = 2;
-
         for (const plat of platforms) {
-            // Check right side
-            const rightProbe = {
-                x: player.x + player.w,
-                y: player.y + 4,
-                w: wallProbe,
-                h: player.h - 8
-            };
-            if (rectOverlap(rightProbe, plat) && !player.onGround) {
-                player.onWall = 1;
-                return;
-            }
-
-            // Check left side
-            const leftProbe = {
-                x: player.x - wallProbe,
-                y: player.y + 4,
-                w: wallProbe,
-                h: player.h - 8
-            };
-            if (rectOverlap(leftProbe, plat) && !player.onGround) {
-                player.onWall = -1;
-                return;
-            }
+            const rp = { x: player.x + player.w, y: player.y + 4, w: 2, h: player.h - 8 };
+            if (rectOverlap(rp, plat) && !player.onGround) { player.onWall = 1; return; }
+            const lp = { x: player.x - 2, y: player.y + 4, w: 2, h: player.h - 8 };
+            if (rectOverlap(lp, plat) && !player.onGround) { player.onWall = -1; return; }
         }
     }
 
     function resolveCollisions() {
         player.onGround = false;
-
         for (const plat of platforms) {
             if (!rectOverlap(player, plat)) continue;
+            const oL = (player.x + player.w) - plat.x;
+            const oR = (plat.x + plat.w) - player.x;
+            const oT = (player.y + player.h) - plat.y;
+            const oB = (plat.y + plat.h) - player.y;
+            const min = Math.min(oL, oR, oT, oB);
+            if (min === oT && player.vy >= 0) { player.y = plat.y - player.h; player.vy = 0; player.onGround = true; }
+            else if (min === oB && player.vy < 0) { player.y = plat.y + plat.h; player.vy = 0; }
+            else if (min === oL) { player.x = plat.x - player.w; player.vx = 0; }
+            else if (min === oR) { player.x = plat.x + plat.w; player.vx = 0; }
+        }
+        // Breakable walls
+        for (const bw of breakableWalls) {
+            if (bw.hp <= 0) continue;
+            if (!rectOverlap(player, bw)) continue;
+            const oL = (player.x + player.w) - bw.x;
+            const oR = (bw.x + bw.w) - player.x;
+            const oT = (player.y + player.h) - bw.y;
+            const oB = (bw.y + bw.h) - player.y;
+            const min = Math.min(oL, oR, oT, oB);
+            if (min === oT && player.vy >= 0) { player.y = bw.y - player.h; player.vy = 0; player.onGround = true; }
+            else if (min === oB && player.vy < 0) { player.y = bw.y + bw.h; player.vy = 0; }
+            else if (min === oL) { player.x = bw.x - player.w; player.vx = 0; }
+            else if (min === oR) { player.x = bw.x + bw.w; player.vx = 0; }
+        }
+    }
 
-            const overlapLeft   = (player.x + player.w) - plat.x;
-            const overlapRight  = (plat.x + plat.w) - player.x;
-            const overlapTop    = (player.y + player.h) - plat.y;
-            const overlapBottom = (plat.y + plat.h) - player.y;
-
-            const minOverlap = Math.min(overlapLeft, overlapRight, overlapTop, overlapBottom);
-
-            if (minOverlap === overlapTop && player.vy >= 0) {
-                player.y = plat.y - player.h;
-                player.vy = 0;
-                player.onGround = true;
-            } else if (minOverlap === overlapBottom && player.vy < 0) {
-                player.y = plat.y + plat.h;
-                player.vy = 0;
-            } else if (minOverlap === overlapLeft) {
-                player.x = plat.x - player.w;
-                player.vx = 0;
-            } else if (minOverlap === overlapRight) {
-                player.x = plat.x + plat.w;
-                player.vx = 0;
+    // ── Melee Attack ────────────────────────────────────────────
+    function performAttack() {
+        player.attackTimer = 12;
+        player.attackCooldown = 20;
+        const hitbox = {
+            x: player.facing === 1 ? player.x + player.w : player.x - 35,
+            y: player.y, w: 35, h: player.h
+        };
+        // Hit enemies
+        for (let i = enemies.length - 1; i >= 0; i--) {
+            if (rectOverlap(hitbox, enemies[i])) damageEnemy(i, 2);
+        }
+        // Hit boss
+        if (boss && !boss.defeated && rectOverlap(hitbox, boss)) damageBoss(2);
+        // Hit breakable walls
+        for (const bw of breakableWalls) {
+            if (bw.hp > 0 && rectOverlap(hitbox, bw)) {
+                bw.hp--;
+                spawnParticles(bw.x + bw.w/2, bw.y + bw.h/2, 5, bw.color, 8, 2);
+                if (bw.hp <= 0) spawnParticles(bw.x + bw.w/2, bw.y + bw.h/2, 15, '#C8B89A', 15, 4);
             }
         }
+        spawnParticles(hitbox.x + hitbox.w/2, hitbox.y + hitbox.h/2, 4, '#FFD700', 10, 2);
     }
 
     // ── Update ──────────────────────────────────────────────────
     function update(dt) {
+        if (gameState !== 'playing') {
+            if (consumeKey(['Enter','Space'])) resetGame();
+            return;
+        }
+
+        if (player.invincible > 0) player.invincible--;
+        if (player.attackCooldown > 0) player.attackCooldown--;
+        if (player.attackTimer > 0) player.attackTimer--;
+        if (screenFlash > 0) screenFlash--;
+
+        // Transition animation
+        if (transitionTimer > 0) {
+            transitionTimer--;
+            if (transitionTimer === 0 && transitionTarget) {
+                currentArea = transitionTarget;
+                transitionTarget = null;
+            }
+            return;
+        }
+
+        // ── Combat inputs ───────────────────────────────────────
+        if (consumeAttack() && player.attackCooldown <= 0) performAttack();
+        if (consumeShoot() && player.attackCooldown <= 0) {
+            player.attackCooldown = 25;
+            spawnProjectile(player.x + player.w/2, player.y + player.h/2 - 2, player.facing, true);
+        }
+
         // ── Dash ────────────────────────────────────────────────
         if (player.dashCooldown > 0) player.dashCooldown--;
-
         if (consumeDash() && player.dashCooldown <= 0 && player.dashTimer <= 0) {
             player.dashTimer = PHYSICS.DASH_DURATION;
             player.dashCooldown = PHYSICS.DASH_COOLDOWN;
             player.dashDir = player.facing;
             player.vy = 0;
-            spawnParticles(
-                player.x + player.w / 2,
-                player.y + player.h / 2,
-                12, '#FFD700', 10, 4
-            );
+            spawnParticles(player.x + player.w/2, player.y + player.h/2, 12, '#FFD700', 10, 4);
         }
-
         if (player.dashTimer > 0) {
             player.dashTimer--;
             player.vx = PHYSICS.DASH_SPEED * player.dashDir;
             player.vy = 0;
-            // Dash trail particles
-            if (player.dashTimer % 2 === 0) {
-                spawnParticles(
-                    player.x + player.w / 2 - player.dashDir * 15,
-                    player.y + player.h / 2,
-                    3, 'rgba(255,215,0,0.8)', 6, 1
-                );
-            }
-            // Skip normal movement during dash
+            if (player.dashTimer % 2 === 0)
+                spawnParticles(player.x + player.w/2 - player.dashDir*15, player.y + player.h/2, 3, 'rgba(255,215,0,0.8)', 6, 1);
             player.x += player.vx;
-            resolveCollisions();
-            checkWallContact();
-            updateParticles();
-            updateCamera();
+            resolveCollisions(); checkWallContact();
+            updateParticles(); updateProjectiles(); updateCamera();
             return;
         }
 
-        // ── Normal horizontal movement ──────────────────────────
-        if (isLeft()) {
-            player.vx -= PHYSICS.MOVE_SPEED;
-            player.facing = -1;
-        }
-        if (isRight()) {
-            player.vx += PHYSICS.MOVE_SPEED;
-            player.facing = 1;
-        }
-
-        // Friction
-        if (!isLeft() && !isRight()) {
-            player.vx *= PHYSICS.FRICTION;
-            if (Math.abs(player.vx) < 0.1) player.vx = 0;
-        }
-
-        // Clamp horizontal speed
+        // ── Movement ────────────────────────────────────────────
+        const gravity = currentArea === 'sky' ? PHYSICS.GRAVITY * 0.65 : PHYSICS.GRAVITY;
+        if (isLeft())  { player.vx -= PHYSICS.MOVE_SPEED; player.facing = -1; }
+        if (isRight()) { player.vx += PHYSICS.MOVE_SPEED; player.facing = 1; }
+        if (!isLeft() && !isRight()) { player.vx *= PHYSICS.FRICTION; if (Math.abs(player.vx) < 0.1) player.vx = 0; }
         player.vx = Math.max(-PHYSICS.MAX_SPEED_X, Math.min(PHYSICS.MAX_SPEED_X, player.vx));
+        player.vy += gravity;
 
-        // Gravity
-        player.vy += PHYSICS.GRAVITY;
-
-        // ── Wall Slide ──────────────────────────────────────────
+        // Wall slide
         player.wallSliding = false;
         if (player.onWall !== 0 && !player.onGround && player.vy > 0) {
-            const pressingIntoWall = (player.onWall === 1 && isRight()) ||
-                                     (player.onWall === -1 && isLeft());
-            if (pressingIntoWall) {
+            const into = (player.onWall === 1 && isRight()) || (player.onWall === -1 && isLeft());
+            if (into) {
                 player.wallSliding = true;
                 player.vy = Math.min(player.vy, PHYSICS.WALL_SLIDE_SPEED);
-                // Wall slide particles
                 if (Math.random() < 0.3) {
                     const wx = player.onWall === 1 ? player.x + player.w : player.x;
                     spawnParticles(wx, player.y + player.h - 5, 1, '#aaa', 3, 0.5);
@@ -339,86 +621,146 @@
             }
         }
 
-        // ── Jump / Double Jump / Wall Jump ──────────────────────
+        // Jump / Double Jump / Wall Jump
         if (consumeJump()) {
             if (player.wallSliding || (player.onWall !== 0 && !player.onGround)) {
-                // Wall jump
                 player.vx = PHYSICS.WALL_JUMP_FORCE_X * -player.onWall;
                 player.vy = PHYSICS.WALL_JUMP_FORCE_Y;
                 player.facing = -player.onWall;
-                player.jumpCount = 1;
-                player.onWall = 0;
-                player.wallSliding = false;
-                spawnParticles(
-                    player.onWall === 1 ? player.x + player.w : player.x,
-                    player.y + player.h / 2,
-                    8, '#ccc', 8, 3
-                );
+                player.jumpCount = 1; player.onWall = 0; player.wallSliding = false;
+                spawnParticles(player.x + player.w/2, player.y + player.h/2, 8, '#ccc', 8, 3);
             } else if (player.onGround) {
-                // Ground jump
                 player.vy = PHYSICS.JUMP_FORCE;
-                player.onGround = false;
-                player.jumpCount = 1;
-                spawnParticles(
-                    player.x + player.w / 2,
-                    player.y + player.h,
-                    6, '#b8926a', 12, 2
-                );
+                player.onGround = false; player.jumpCount = 1;
+                spawnParticles(player.x + player.w/2, player.y + player.h, 6, '#b8926a', 12, 2);
             } else if (player.jumpCount < PHYSICS.MAX_JUMPS) {
-                // Double jump
                 player.vy = PHYSICS.JUMP_FORCE * 0.85;
                 player.jumpCount++;
-                spawnParticles(
-                    player.x + player.w / 2,
-                    player.y + player.h,
-                    8, '#88ccff', 8, 3
-                );
+                spawnParticles(player.x + player.w/2, player.y + player.h, 8, '#88ccff', 8, 3);
             }
         }
 
-        // Apply velocity
         player.x += player.vx;
         player.y += player.vy;
+        resolveCollisions(); checkWallContact();
+        if (player.onGround) player.jumpCount = 0;
 
-        // Collision
-        resolveCollisions();
-        checkWallContact();
-
-        // Reset jump count on ground
-        if (player.onGround) {
-            player.jumpCount = 0;
+        // Fall out reset
+        if (player.y > 900) {
+            player.x = 200; player.y = 400; player.vx = 0; player.vy = 0;
+            player.jumpCount = 0; player.dashTimer = 0;
+            currentArea = 'ground';
         }
 
-        // Fall out of world reset
-        if (player.y > 800) {
-            player.x = 200;
-            player.y = 200;
-            player.vx = 0;
-            player.vy = 0;
-            player.jumpCount = 0;
-            player.dashTimer = 0;
+        // ── Collectibles ────────────────────────────────────────
+        for (const c of coins) {
+            if (c.collected) continue;
+            if (!c.settled) { c.vy += 0.3; c.y += c.vy; if (c.y > 480) { c.y = 480; c.settled = true; } }
+            if (rectOverlap(player, c)) {
+                c.collected = true; player.coins++;
+                spawnParticles(c.x + 6, c.y + 6, 6, '#FFD700', 6, 2);
+            }
+        }
+        for (const k of keyItems) {
+            if (k.collected) continue;
+            if (rectOverlap(player, k)) {
+                k.collected = true; player.keysHeld++;
+                spawnParticles(k.x + 8, k.y + 8, 10, '#FFD700', 10, 3);
+            }
+        }
+        for (const d of doors) {
+            if (d.open) continue;
+            const hasKey = keyItems.find(k => k.collected && k.id === d.keyId);
+            if (hasKey && rectOverlap(player, d) && isDown()) {
+                d.open = true;
+                spawnParticles(d.x + d.w/2, d.y + d.h/2, 15, '#FFD700', 15, 3);
+            }
         }
 
-        updateParticles();
+        // Sky shard
+        if (skyShard && !skyShard.collected && rectOverlap(player, skyShard)) {
+            skyShard.collected = true;
+            player.hasSkyShard = true;
+            transitionTarget = 'sky';
+            transitionTimer = 40;
+            // Teleport to sky area
+            player.x = 280; player.y = -540; player.vx = 0; player.vy = 0;
+            spawnParticles(skyShard.x + 10, skyShard.y + 10, 20, '#88EEFF', 20, 5);
+        }
+
+        // Challenge room
+        if (challengeRoom && !challengeActive && !challengeComplete && rectOverlap(player, challengeRoom) && isDown()) {
+            challengeActive = true;
+            challengeTimer = 600; // 10 seconds at 60fps
+        }
+        if (challengeActive) {
+            challengeTimer--;
+            if (challengeTimer <= 0) { challengeActive = false; player.x = 3150; player.y = 370; }
+            // Check if player reached the end platform at x=3400
+            if (player.x > 3380 && player.y < 400) {
+                challengeComplete = true; challengeActive = false;
+                player.coins += 10;
+                spawnParticles(player.x + player.w/2, player.y + player.h/2, 20, '#FFD700', 20, 5);
+            }
+        }
+
+        // Update area tracking
+        if (player.y < -300) currentArea = 'sky';
+        else if (player.y > 550) currentArea = 'underground';
+        else currentArea = 'ground';
+
+        // Victory check
+        const collected = coins.filter(c => c.collected).length;
+        if (boss && boss.defeated && collected >= totalCoins * 0.7 && challengeComplete) {
+            gameState = 'victory';
+            const score = player.coins * 100 + player.hp * 500;
+            if (score > highScore) { highScore = score; localStorage.setItem('skybreak_highscore', String(highScore)); }
+        }
+
+        updateEnemies(); updateBoss();
+        updateParticles(); updateProjectiles();
         updateCamera();
     }
 
     // ── Render ──────────────────────────────────────────────────
     function drawBackground() {
         const grad = ctx.createLinearGradient(0, 0, 0, canvas.height);
-        grad.addColorStop(0, '#4A90D9');
-        grad.addColorStop(0.6, '#87CEEB');
-        grad.addColorStop(1, '#B0E0F0');
+        if (currentArea === 'sky') {
+            grad.addColorStop(0, '#1a1a4e');
+            grad.addColorStop(0.5, '#4A6FA5');
+            grad.addColorStop(1, '#87CEEB');
+        } else if (currentArea === 'underground') {
+            grad.addColorStop(0, '#2a1a0e');
+            grad.addColorStop(0.5, '#3a2a1e');
+            grad.addColorStop(1, '#4a3a2e');
+        } else {
+            grad.addColorStop(0, '#4A90D9');
+            grad.addColorStop(0.6, '#87CEEB');
+            grad.addColorStop(1, '#B0E0F0');
+        }
         ctx.fillStyle = grad;
         ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-        // Parallax clouds
-        ctx.fillStyle = 'rgba(255, 255, 255, 0.6)';
-        const cloudOffset = camera.x * 0.3;
-        for (let i = 0; i < 8; i++) {
-            const cx = (i * 400 + 100) - (cloudOffset % 3200);
-            const cy = 60 + (i % 3) * 50;
-            drawCloud(cx, cy, 40 + (i % 3) * 20);
+        // Clouds
+        if (currentArea !== 'underground') {
+            ctx.fillStyle = currentArea === 'sky' ? 'rgba(255,255,255,0.3)' : 'rgba(255,255,255,0.6)';
+            const off = camera.x * 0.3;
+            for (let i = 0; i < 8; i++) {
+                const cx = (i * 400 + 100) - (off % 3200);
+                const cy = 60 + (i % 3) * 50;
+                drawCloud(cx, cy, 40 + (i % 3) * 20);
+            }
+        }
+
+        // Sky area sparkles
+        if (currentArea === 'sky') {
+            ctx.fillStyle = 'rgba(255,255,255,0.5)';
+            for (let i = 0; i < 30; i++) {
+                const sx = ((i * 137 + Date.now() * 0.01) % canvas.width);
+                const sy = ((i * 97 + Date.now() * 0.005) % canvas.height);
+                const sz = 1 + Math.sin(Date.now() * 0.003 + i) * 1;
+                ctx.fillRect(sx, sy, sz, sz);
+            }
         }
     }
 
@@ -433,23 +775,101 @@
 
     function drawPlatforms() {
         for (const plat of platforms) {
-            const sx = plat.x - camera.x;
-            const sy = plat.y - camera.y;
-
+            const sx = plat.x - camera.x, sy = plat.y - camera.y;
             if (sx + plat.w < 0 || sx > canvas.width || sy + plat.h < 0 || sy > canvas.height) continue;
-
             ctx.fillStyle = plat.color;
             ctx.fillRect(sx, sy, plat.w, plat.h);
-
             ctx.strokeStyle = 'rgba(0,0,0,0.15)';
             ctx.lineWidth = 1;
             ctx.strokeRect(sx, sy, plat.w, plat.h);
         }
+        // Breakable walls
+        for (const bw of breakableWalls) {
+            if (bw.hp <= 0) continue;
+            const sx = bw.x - camera.x, sy = bw.y - camera.y;
+            ctx.fillStyle = bw.color;
+            ctx.fillRect(sx, sy, bw.w, bw.h);
+            // Crack lines
+            ctx.strokeStyle = 'rgba(0,0,0,0.3)';
+            ctx.lineWidth = 1;
+            if (bw.hp < 3) { ctx.beginPath(); ctx.moveTo(sx+3, sy+5); ctx.lineTo(sx+bw.w-3, sy+bw.h-5); ctx.stroke(); }
+            if (bw.hp < 2) { ctx.beginPath(); ctx.moveTo(sx+bw.w-3, sy+3); ctx.lineTo(sx+3, sy+bw.h-3); ctx.stroke(); }
+        }
+    }
+
+    function drawCollectibles() {
+        // Coins
+        for (const c of coins) {
+            if (c.collected) continue;
+            const sx = c.x - camera.x, sy = c.y - camera.y;
+            const pulse = Math.sin(Date.now() * 0.005 + c.x) * 2;
+            ctx.fillStyle = '#FFD700';
+            ctx.beginPath();
+            ctx.arc(sx + 6, sy + 6 + pulse, 6, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.fillStyle = '#FFF8DC';
+            ctx.beginPath();
+            ctx.arc(sx + 5, sy + 5 + pulse, 2, 0, Math.PI * 2);
+            ctx.fill();
+        }
+        // Keys
+        for (const k of keyItems) {
+            if (k.collected) continue;
+            const sx = k.x - camera.x, sy = k.y - camera.y;
+            const bob = Math.sin(Date.now() * 0.004) * 3;
+            ctx.fillStyle = '#FFD700';
+            ctx.fillRect(sx + 4, sy + bob, 8, 10);
+            ctx.fillRect(sx + 2, sy + bob, 12, 4);
+            ctx.fillRect(sx + 8, sy + bob + 6, 4, 3);
+        }
+        // Doors
+        for (const d of doors) {
+            const sx = d.x - camera.x, sy = d.y - camera.y;
+            ctx.fillStyle = d.open ? '#5A4A3E' : '#8B4513';
+            ctx.fillRect(sx, sy, d.w, d.h);
+            if (!d.open) {
+                ctx.fillStyle = '#FFD700';
+                ctx.fillRect(sx + d.w - 8, sy + d.h/2 - 2, 4, 4);
+                ctx.fillStyle = 'rgba(0,0,0,0.3)';
+                ctx.font = '10px monospace'; ctx.textAlign = 'center';
+                ctx.fillText('🔒', sx + d.w/2, sy - 4);
+            }
+        }
+        // Sky shard
+        if (skyShard && !skyShard.collected) {
+            const sx = skyShard.x - camera.x, sy = skyShard.y - camera.y;
+            const pulse = Math.sin(Date.now() * 0.006) * 3;
+            // Glow
+            ctx.fillStyle = 'rgba(136,238,255,0.3)';
+            ctx.beginPath();
+            ctx.arc(sx + 10, sy + 10 + pulse, 18, 0, Math.PI * 2);
+            ctx.fill();
+            // Shard
+            ctx.fillStyle = '#88EEFF';
+            ctx.beginPath();
+            ctx.moveTo(sx + 10, sy + pulse);
+            ctx.lineTo(sx + 20, sy + 10 + pulse);
+            ctx.lineTo(sx + 10, sy + 20 + pulse);
+            ctx.lineTo(sx, sy + 10 + pulse);
+            ctx.closePath();
+            ctx.fill();
+            ctx.fillStyle = '#fff';
+            ctx.fillRect(sx + 8, sy + 6 + pulse, 4, 4);
+        }
+        // Challenge room trigger
+        if (challengeRoom && !challengeComplete) {
+            const sx = challengeRoom.x - camera.x, sy = challengeRoom.y - camera.y;
+            ctx.fillStyle = challengeActive ? '#FF4444' : '#FF8800';
+            ctx.fillRect(sx, sy, challengeRoom.w, challengeRoom.h);
+            ctx.fillStyle = '#fff';
+            ctx.font = '10px monospace'; ctx.textAlign = 'center';
+            ctx.fillText(challengeActive ? 'GO!' : '⏱', sx + 15, sy - 4);
+        }
     }
 
     function drawPlayer() {
-        const px = player.x - camera.x;
-        const py = player.y - camera.y;
+        if (player.invincible > 0 && Math.floor(player.invincible / 4) % 2 === 0) return;
+        const px = player.x - camera.x, py = player.y - camera.y;
 
         // Dash afterimage
         if (player.dashTimer > 0) {
@@ -463,18 +883,13 @@
         if (player.onGround) {
             ctx.fillStyle = 'rgba(0,0,0,0.15)';
             ctx.beginPath();
-            ctx.ellipse(px + player.w / 2, py + player.h + 2, player.w / 2, 4, 0, 0, Math.PI * 2);
+            ctx.ellipse(px + player.w/2, py + player.h + 2, player.w/2, 4, 0, 0, Math.PI * 2);
             ctx.fill();
         }
 
-        // Wall slide visual (stretch player slightly)
         const squash = player.wallSliding ? 0.9 : 1;
-
-        // Body
         ctx.fillStyle = player.dashTimer > 0 ? '#FFD700' : '#E84855';
         ctx.fillRect(px + 2, py + 4, player.w - 4, (player.h - 4) * squash);
-
-        // Head area
         ctx.fillStyle = player.dashTimer > 0 ? '#FFE44D' : '#F05A67';
         ctx.fillRect(px + 2, py, player.w - 4, 16);
 
@@ -483,76 +898,201 @@
         ctx.fillStyle = '#fff';
         ctx.fillRect(eyeX, py + 5, 8, 8);
         ctx.fillStyle = '#1a1a2e';
-        const pupilX = player.facing === 1 ? eyeX + 4 : eyeX + 1;
-        ctx.fillRect(pupilX, py + 7, 3, 4);
+        ctx.fillRect(player.facing === 1 ? eyeX + 4 : eyeX, py + 7, 3, 4);
 
         // Feet
         ctx.fillStyle = '#C13040';
         ctx.fillRect(px + 3, py + player.h - 6, 9, 6);
         ctx.fillRect(px + player.w - 12, py + player.h - 6, 9, 6);
+
+        // Sword swing
+        if (player.attackTimer > 0) {
+            const sw = player.facing === 1 ? px + player.w : px - 30;
+            ctx.fillStyle = '#C0C0C0';
+            ctx.save();
+            ctx.translate(sw + 15, py + player.h/2);
+            ctx.rotate((player.attackTimer / 12) * Math.PI * 0.5 * player.facing);
+            ctx.fillRect(-2, -18, 4, 36);
+            ctx.fillStyle = '#FFD700';
+            ctx.fillRect(-4, -18, 8, 4);
+            ctx.restore();
+        }
     }
 
     function drawHUD() {
-        // Controls hint
-        ctx.fillStyle = 'rgba(0, 0, 0, 0.35)';
-        ctx.fillRect(10, canvas.height - 65, 360, 55);
+        // HP bar
+        const hpW = 120, hpH = 12;
+        ctx.fillStyle = 'rgba(0,0,0,0.4)';
+        ctx.fillRect(14, 14, hpW + 4, hpH + 4);
+        ctx.fillStyle = '#333';
+        ctx.fillRect(16, 16, hpW, hpH);
+        ctx.fillStyle = player.hp > 2 ? '#E74C3C' : '#FF0000';
+        ctx.fillRect(16, 16, hpW * (player.hp / player.maxHp), hpH);
         ctx.fillStyle = '#fff';
-        ctx.font = '13px monospace';
-        ctx.textAlign = 'left';
-        ctx.fillText('WASD / Arrows = move   |   Space / W / Up = jump', 20, canvas.height - 45);
-        ctx.fillText('Shift / J = dash       |   Double-tap jump mid-air', 20, canvas.height - 20);
+        ctx.font = '11px monospace'; ctx.textAlign = 'left';
+        ctx.fillText(`HP ${player.hp}/${player.maxHp}`, 18, 26);
 
-        // Title
-        ctx.fillStyle = 'rgba(255,255,255,0.8)';
-        ctx.font = 'bold 16px monospace';
-        ctx.textAlign = 'right';
-        ctx.fillText('SKYBREAK', canvas.width - 20, 28);
+        // Coins
+        ctx.fillStyle = '#FFD700';
+        ctx.font = '14px monospace';
+        ctx.fillText(`● ${player.coins}`, 16, 48);
 
-        // Ability indicators
-        const indicatorY = 50;
+        // Keys
+        if (player.keysHeld > 0) {
+            ctx.fillStyle = '#FFD700';
+            ctx.fillText(`🗝 ${player.keysHeld}`, 80, 48);
+        }
+
+        // Area indicator
+        ctx.fillStyle = 'rgba(0,0,0,0.35)';
+        ctx.fillRect(canvas.width/2 - 60, 10, 120, 22);
+        ctx.fillStyle = currentArea === 'sky' ? '#88EEFF' : currentArea === 'underground' ? '#C8A882' : '#fff';
+        ctx.font = 'bold 12px monospace'; ctx.textAlign = 'center';
+        ctx.fillText(currentArea.toUpperCase(), canvas.width/2, 26);
+
+        // Ability indicators (right side)
         ctx.textAlign = 'right';
         ctx.font = '12px monospace';
-
-        // Double jump indicator
         const jumpsLeft = PHYSICS.MAX_JUMPS - player.jumpCount;
         ctx.fillStyle = jumpsLeft > 0 ? '#88ccff' : '#666';
-        ctx.fillText(`Jumps: ${'●'.repeat(jumpsLeft)}${'○'.repeat(player.jumpCount)}`, canvas.width - 20, indicatorY);
-
-        // Dash indicator
+        ctx.fillText(`Jumps: ${'●'.repeat(Math.max(0,jumpsLeft))}${'○'.repeat(Math.min(PHYSICS.MAX_JUMPS,player.jumpCount))}`, canvas.width - 20, 50);
         const dashReady = player.dashCooldown <= 0 && player.dashTimer <= 0;
         ctx.fillStyle = dashReady ? '#FFD700' : '#666';
-        const dashPct = dashReady ? 100 : Math.round((1 - player.dashCooldown / PHYSICS.DASH_COOLDOWN) * 100);
-        ctx.fillText(`Dash: ${dashReady ? 'READY' : dashPct + '%'}`, canvas.width - 20, indicatorY + 18);
+        ctx.fillText(`Dash: ${dashReady ? 'READY' : Math.round((1 - player.dashCooldown/PHYSICS.DASH_COOLDOWN)*100) + '%'}`, canvas.width - 20, 68);
+        if (player.wallSliding) { ctx.fillStyle = '#aaa'; ctx.fillText('WALL SLIDE', canvas.width - 20, 86); }
 
-        // Wall slide indicator
-        if (player.wallSliding) {
-            ctx.fillStyle = '#aaa';
-            ctx.fillText('WALL SLIDE', canvas.width - 20, indicatorY + 36);
+        // Title
+        ctx.fillStyle = 'rgba(255,255,255,0.7)';
+        ctx.font = 'bold 16px monospace';
+        ctx.fillText('SKYBREAK', canvas.width - 20, 28);
+
+        // Controls
+        ctx.fillStyle = 'rgba(0,0,0,0.3)';
+        ctx.fillRect(10, canvas.height - 78, 400, 68);
+        ctx.fillStyle = '#fff';
+        ctx.font = '12px monospace'; ctx.textAlign = 'left';
+        ctx.fillText('Move: WASD/Arrows  Jump: Space  Dash: Shift/J', 20, canvas.height - 58);
+        ctx.fillText('Melee: K/Z   Ranged: L/X   Interact: S/Down', 20, canvas.height - 40);
+        ctx.fillText('Break cracked walls with melee!', 20, canvas.height - 22);
+
+        // Challenge timer
+        if (challengeActive) {
+            ctx.fillStyle = 'rgba(200,0,0,0.6)';
+            ctx.fillRect(canvas.width/2 - 80, 40, 160, 30);
+            ctx.fillStyle = '#fff';
+            ctx.font = 'bold 18px monospace'; ctx.textAlign = 'center';
+            ctx.fillText(`⏱ ${(challengeTimer / 60).toFixed(1)}s`, canvas.width/2, 62);
         }
+
+        // Minimap
+        drawMinimap();
+    }
+
+    function drawMinimap() {
+        const mw = 140, mh = 50;
+        const mx = canvas.width - mw - 16, my = canvas.height - mh - 16;
+        ctx.fillStyle = 'rgba(0,0,0,0.4)';
+        ctx.fillRect(mx - 2, my - 2, mw + 4, mh + 4);
+        ctx.fillStyle = 'rgba(30,30,50,0.7)';
+        ctx.fillRect(mx, my, mw, mh);
+        // Scale: world x [-500, 4200] -> minimap, y [-800, 800] -> minimap
+        const scaleX = mw / 4700, scaleY = mh / 1600;
+        const offX = 500;
+        const offY = 800;
+        // Platforms
+        ctx.fillStyle = 'rgba(100,200,100,0.5)';
+        for (const p of platforms) {
+            const px = mx + (p.x + offX) * scaleX;
+            const py = my + (p.y + offY) * scaleY;
+            const pw = Math.max(1, p.w * scaleX);
+            const ph = Math.max(1, p.h * scaleY);
+            if (px + pw > mx && px < mx + mw) ctx.fillRect(px, py, pw, ph);
+        }
+        // Player dot
+        ctx.fillStyle = '#E84855';
+        const ppx = mx + (player.x + offX) * scaleX;
+        const ppy = my + (player.y + offY) * scaleY;
+        ctx.fillRect(ppx - 2, ppy - 2, 4, 4);
+        // Boss dot
+        if (boss && !boss.defeated && boss.active) {
+            ctx.fillStyle = '#FF0000';
+            const bpx = mx + (boss.x + offX) * scaleX;
+            const bpy = my + (boss.y + offY) * scaleY;
+            ctx.fillRect(bpx - 2, bpy - 2, 5, 5);
+        }
+    }
+
+    function drawTransition() {
+        if (transitionTimer > 0) {
+            ctx.fillStyle = `rgba(255,255,255,${transitionTimer / 40})`;
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+        }
+    }
+
+    function drawScreenFlash() {
+        if (screenFlash > 0) {
+            ctx.fillStyle = `rgba(255,0,0,${screenFlash * 0.04})`;
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+        }
+    }
+
+    function drawVictoryScreen() {
+        ctx.fillStyle = 'rgba(0,0,0,0.7)';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.fillStyle = '#FFD700';
+        ctx.font = 'bold 48px monospace'; ctx.textAlign = 'center';
+        ctx.fillText('SKYBREAK', canvas.width/2, canvas.height/2 - 60);
+        ctx.fillStyle = '#fff';
+        ctx.font = '24px monospace';
+        ctx.fillText('VICTORY!', canvas.width/2, canvas.height/2 - 10);
+        ctx.font = '16px monospace';
+        const score = player.coins * 100 + player.hp * 500;
+        ctx.fillText(`Score: ${score}   |   High Score: ${highScore}`, canvas.width/2, canvas.height/2 + 30);
+        ctx.fillText(`Coins: ${player.coins}/${totalCoins}   HP: ${player.hp}/${player.maxHp}`, canvas.width/2, canvas.height/2 + 60);
+        ctx.fillStyle = '#aaa';
+        ctx.font = '14px monospace';
+        ctx.fillText('Press ENTER to play again', canvas.width/2, canvas.height/2 + 100);
     }
 
     function render() {
         ctx.clearRect(0, 0, canvas.width, canvas.height);
         drawBackground();
         drawPlatforms();
+        drawCollectibles();
         drawParticles();
+        drawProjectiles();
+        drawEnemies();
+        drawBoss();
         drawPlayer();
         drawHUD();
+        drawTransition();
+        drawScreenFlash();
+        if (gameState === 'victory') drawVictoryScreen();
     }
 
-    // ── Game Loop ───────────────────────────────────────────────
-    let lastTime = 0;
+    // ── Game Init & Loop ────────────────────────────────────────
+    function resetGame() {
+        gameState = 'playing'; currentArea = 'ground';
+        player.x = 200; player.y = 400; player.vx = 0; player.vy = 0;
+        player.hp = player.maxHp; player.coins = 0; player.keysHeld = 0;
+        player.hasSkyShard = false; player.jumpCount = 0;
+        player.dashTimer = 0; player.dashCooldown = 0;
+        player.invincible = 0; player.attackTimer = 0; player.attackCooldown = 0;
+        particles.length = 0; projectiles.length = 0;
+        challengeActive = false; challengeComplete = false; challengeTimer = 0;
+        createLevel(); createCollectibles(); createEnemies(); createBoss();
+    }
 
+    resetGame();
+
+    let lastTime = 0;
     function gameLoop(timestamp) {
         const dt = Math.min((timestamp - lastTime) / 16.67, 3);
         lastTime = timestamp;
-
         update(dt);
         render();
-
         requestAnimationFrame(gameLoop);
     }
-
     requestAnimationFrame(gameLoop);
 
     </script>
