@@ -13,25 +13,311 @@
 <body>
     <canvas id="game"></canvas>
     <script>
-        // Skybreak — Single-File HTML Platformer
-        const canvas = document.getElementById('game');
-        const ctx = canvas.getContext('2d');
+    // ============================================================
+    //  SKYBREAK — Core Platform Engine
+    // ============================================================
+
+    const canvas = document.getElementById('game');
+    const ctx = canvas.getContext('2d');
+
+    function resizeCanvas() {
         canvas.width = window.innerWidth;
         canvas.height = window.innerHeight;
+    }
+    resizeCanvas();
+    window.addEventListener('resize', resizeCanvas);
 
-        // Game code will be built in feature branches
-        // Sky gradient background
-        const gradient = ctx.createLinearGradient(0, 0, 0, canvas.height);
-        gradient.addColorStop(0, '#4A90D9');
-        gradient.addColorStop(1, '#87CEEB');
-        ctx.fillStyle = gradient;
+    // ── Input Handler ───────────────────────────────────────────
+    const keys = {};
+    window.addEventListener('keydown', e => {
+        keys[e.code] = true;
+        e.preventDefault();
+    });
+    window.addEventListener('keyup', e => {
+        keys[e.code] = false;
+        e.preventDefault();
+    });
+
+    function isLeft()  { return keys['ArrowLeft']  || keys['KeyA']; }
+    function isRight() { return keys['ArrowRight'] || keys['KeyD']; }
+    function isJump()  { return keys['ArrowUp']    || keys['KeyW'] || keys['Space']; }
+
+    // ── Player Physics ────────────────────────────────────────────
+    const PHYSICS = {
+        GRAVITY:     0.85,
+        JUMP_FORCE: -14,
+        MOVE_SPEED:  1.0,
+        MAX_SPEED_X: 7,
+        FRICTION:    0.88,
+        PLAYER_W:    28,
+        PLAYER_H:    40,
+    };
+
+    // ── Player ──────────────────────────────────────────────────
+    const player = {
+        x: 200,
+        y: 200,
+        vx: 0,
+        vy: 0,
+        w: PHYSICS.PLAYER_W,
+        h: PHYSICS.PLAYER_H,
+        onGround: false,
+        facing: 1, // 1 = right, -1 = left
+    };
+
+    // ── Platforms / Level ───────────────────────────────────────
+    // Each platform: { x, y, w, h, color }
+    const platforms = [
+        // Ground
+        { x: -500, y: 500, w: 4000, h: 60, color: '#4a7c3f' },
+        // Grass top layer
+        { x: -500, y: 492, w: 4000, h: 12, color: '#6abf4b' },
+
+        // Platforms to jump between
+        { x: 300,  y: 400, w: 120, h: 20, color: '#8B6914' },
+        { x: 500,  y: 320, w: 120, h: 20, color: '#8B6914' },
+        { x: 720,  y: 260, w: 150, h: 20, color: '#8B6914' },
+        { x: 950,  y: 320, w: 100, h: 20, color: '#8B6914' },
+        { x: 1100, y: 250, w: 140, h: 20, color: '#8B6914' },
+
+        // Higher platforms
+        { x: 1300, y: 180, w: 100, h: 20, color: '#8B6914' },
+        { x: 1500, y: 130, w: 160, h: 20, color: '#8B6914' },
+        { x: 1750, y: 200, w: 120, h: 20, color: '#8B6914' },
+
+        // Floating islands
+        { x: 2000, y: 350, w: 200, h: 30, color: '#6abf4b' },
+        { x: 2300, y: 280, w: 180, h: 30, color: '#6abf4b' },
+        { x: 2600, y: 220, w: 220, h: 30, color: '#6abf4b' },
+
+        // Tall walls for future wall-jump testing
+        { x: 1900, y: 300, w: 30, h: 200, color: '#7a7a7a' },
+        { x: 2050, y: 250, w: 30, h: 250, color: '#7a7a7a' },
+    ];
+
+    // ── Camera ──────────────────────────────────────────────────
+    const camera = {
+        x: 0,
+        y: 0,
+        smoothing: 0.08,
+    };
+
+    function updateCamera() {
+        const targetX = player.x + player.w / 2 - canvas.width / 2;
+        const targetY = player.y + player.h / 2 - canvas.height / 2 + 50;
+
+        camera.x += (targetX - camera.x) * camera.smoothing;
+        camera.y += (targetY - camera.y) * camera.smoothing;
+    }
+
+    // ── Collision Detection ─────────────────────────────────────
+    function rectOverlap(a, b) {
+        return a.x < b.x + b.w &&
+               a.x + a.w > b.x &&
+               a.y < b.y + b.h &&
+               a.y + a.h > b.y;
+    }
+
+    function resolveCollisions() {
+        player.onGround = false;
+
+        for (const plat of platforms) {
+            if (!rectOverlap(player, plat)) continue;
+
+            const overlapLeft   = (player.x + player.w) - plat.x;
+            const overlapRight  = (plat.x + plat.w) - player.x;
+            const overlapTop    = (player.y + player.h) - plat.y;
+            const overlapBottom = (plat.y + plat.h) - player.y;
+
+            const minOverlap = Math.min(overlapLeft, overlapRight, overlapTop, overlapBottom);
+
+            if (minOverlap === overlapTop && player.vy >= 0) {
+                player.y = plat.y - player.h;
+                player.vy = 0;
+                player.onGround = true;
+            } else if (minOverlap === overlapBottom && player.vy < 0) {
+                player.y = plat.y + plat.h;
+                player.vy = 0;
+            } else if (minOverlap === overlapLeft) {
+                player.x = plat.x - player.w;
+                player.vx = 0;
+            } else if (minOverlap === overlapRight) {
+                player.x = plat.x + plat.w;
+                player.vx = 0;
+            }
+        }
+    }
+
+    // ── Update ──────────────────────────────────────────────────
+    let jumpPressed = false;
+
+    function update(dt) {
+        // Horizontal movement
+        if (isLeft()) {
+            player.vx -= PHYSICS.MOVE_SPEED;
+            player.facing = -1;
+        }
+        if (isRight()) {
+            player.vx += PHYSICS.MOVE_SPEED;
+            player.facing = 1;
+        }
+
+        // Friction
+        if (!isLeft() && !isRight()) {
+            player.vx *= PHYSICS.FRICTION;
+            if (Math.abs(player.vx) < 0.1) player.vx = 0;
+        }
+
+        // Clamp horizontal speed
+        player.vx = Math.max(-PHYSICS.MAX_SPEED_X, Math.min(PHYSICS.MAX_SPEED_X, player.vx));
+
+        // Gravity
+        player.vy += PHYSICS.GRAVITY;
+
+        // Jump (require key release between jumps)
+        if (isJump() && player.onGround && !jumpPressed) {
+            player.vy = PHYSICS.JUMP_FORCE;
+            player.onGround = false;
+            jumpPressed = true;
+        }
+        if (!isJump()) jumpPressed = false;
+
+        // Apply velocity
+        player.x += player.vx;
+        player.y += player.vy;
+
+        // Collision
+        resolveCollisions();
+
+        // Fall out of world reset
+        if (player.y > 800) {
+            player.x = 200;
+            player.y = 200;
+            player.vx = 0;
+            player.vy = 0;
+        }
+
+        updateCamera();
+    }
+
+    // ── Render ──────────────────────────────────────────────────
+    function drawBackground() {
+        const grad = ctx.createLinearGradient(0, 0, 0, canvas.height);
+        grad.addColorStop(0, '#4A90D9');
+        grad.addColorStop(0.6, '#87CEEB');
+        grad.addColorStop(1, '#B0E0F0');
+        ctx.fillStyle = grad;
         ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        // Parallax clouds
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.6)';
+        const cloudOffset = camera.x * 0.3;
+        for (let i = 0; i < 8; i++) {
+            const cx = (i * 400 + 100) - (cloudOffset % 3200);
+            const cy = 60 + (i % 3) * 50;
+            drawCloud(cx, cy, 40 + (i % 3) * 20);
+        }
+    }
+
+    function drawCloud(x, y, size) {
+        ctx.beginPath();
+        ctx.arc(x, y, size, 0, Math.PI * 2);
+        ctx.arc(x + size * 0.8, y - size * 0.3, size * 0.7, 0, Math.PI * 2);
+        ctx.arc(x + size * 1.4, y, size * 0.8, 0, Math.PI * 2);
+        ctx.arc(x - size * 0.5, y + size * 0.1, size * 0.6, 0, Math.PI * 2);
+        ctx.fill();
+    }
+
+    function drawPlatforms() {
+        for (const plat of platforms) {
+            const sx = plat.x - camera.x;
+            const sy = plat.y - camera.y;
+
+            // Skip offscreen platforms
+            if (sx + plat.w < 0 || sx > canvas.width || sy + plat.h < 0 || sy > canvas.height) continue;
+
+            ctx.fillStyle = plat.color;
+            ctx.fillRect(sx, sy, plat.w, plat.h);
+
+            ctx.strokeStyle = 'rgba(0,0,0,0.15)';
+            ctx.lineWidth = 1;
+            ctx.strokeRect(sx, sy, plat.w, plat.h);
+        }
+    }
+
+    function drawPlayer() {
+        const px = player.x - camera.x;
+        const py = player.y - camera.y;
+
+        // Shadow
+        if (player.onGround) {
+            ctx.fillStyle = 'rgba(0,0,0,0.15)';
+            ctx.beginPath();
+            ctx.ellipse(px + player.w / 2, py + player.h + 2, player.w / 2, 4, 0, 0, Math.PI * 2);
+            ctx.fill();
+        }
+
+        // Body
+        ctx.fillStyle = '#E84855';
+        ctx.fillRect(px + 2, py + 4, player.w - 4, player.h - 4);
+
+        // Head area (slightly brighter)
+        ctx.fillStyle = '#F05A67';
+        ctx.fillRect(px + 2, py, player.w - 4, 16);
+
+        // Eyes
+        const eyeX = player.facing === 1 ? px + 16 : px + 5;
+        ctx.fillStyle = '#fff';
+        ctx.fillRect(eyeX, py + 5, 8, 8);
         ctx.fillStyle = '#1a1a2e';
-        ctx.font = '48px monospace';
-        ctx.textAlign = 'center';
-        ctx.fillText('SKYBREAK', canvas.width / 2, canvas.height / 2);
-        ctx.font = '18px monospace';
-        ctx.fillText('Coming soon...', canvas.width / 2, canvas.height / 2 + 40);
+        const pupilX = player.facing === 1 ? eyeX + 4 : eyeX + 1;
+        ctx.fillRect(pupilX, py + 7, 3, 4);
+
+        // Feet
+        ctx.fillStyle = '#C13040';
+        ctx.fillRect(px + 3, py + player.h - 6, 9, 6);
+        ctx.fillRect(px + player.w - 12, py + player.h - 6, 9, 6);
+    }
+
+    function drawHUD() {
+        // Controls hint (bottom left)
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.35)';
+        ctx.fillRect(10, canvas.height - 40, 340, 30);
+        ctx.fillStyle = '#fff';
+        ctx.font = '13px monospace';
+        ctx.textAlign = 'left';
+        ctx.fillText('WASD / Arrows = move   |   Space / W / Up = jump', 20, canvas.height - 20);
+
+        // Title
+        ctx.fillStyle = 'rgba(255,255,255,0.8)';
+        ctx.font = 'bold 16px monospace';
+        ctx.textAlign = 'right';
+        ctx.fillText('SKYBREAK', canvas.width - 20, 28);
+    }
+
+    function render() {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        drawBackground();
+        drawPlatforms();
+        drawPlayer();
+        drawHUD();
+    }
+
+    // ── Game Loop ───────────────────────────────────────────────
+    let lastTime = 0;
+
+    function gameLoop(timestamp) {
+        const dt = Math.min((timestamp - lastTime) / 16.67, 3);
+        lastTime = timestamp;
+
+        update(dt);
+        render();
+
+        requestAnimationFrame(gameLoop);
+    }
+
+    requestAnimationFrame(gameLoop);
+
     </script>
 </body>
 </html>
