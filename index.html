@@ -42,27 +42,16 @@
     function isRight() { return keys['ArrowRight'] || keys['KeyD']; }
     function isJump()  { return keys['ArrowUp']    || keys['KeyW'] || keys['Space']; }
 
-    // ── TODO(human): Player Physics Tuning ──────────────────────
-    // These constants control how the player feels to control.
-    // Tweak these values to get the platforming feel YOU want!
-    //
-    // GRAVITY:      How fast the player falls (higher = heavier)
-    // JUMP_FORCE:   Initial upward velocity on jump (negative = up)
-    // MOVE_SPEED:   Horizontal acceleration when pressing left/right
-    // MAX_SPEED_X:  Cap on horizontal velocity
-    // FRICTION:     Horizontal slowdown when not pressing a direction (0-1, lower = more slippery)
-    // PLAYER_W/H:   Player hitbox size in pixels
-    //
+    // ── Player Physics ────────────────────────────────────────────
     const PHYSICS = {
-        GRAVITY:     0.6,
-        JUMP_FORCE: -12,
-        MOVE_SPEED:  0.8,
-        MAX_SPEED_X: 6,
-        FRICTION:    0.85,
+        GRAVITY:     0.85,
+        JUMP_FORCE: -14,
+        MOVE_SPEED:  1.0,
+        MAX_SPEED_X: 7,
+        FRICTION:    0.88,
         PLAYER_W:    28,
         PLAYER_H:    40,
     };
-    // ── End TODO(human) ─────────────────────────────────────────
 
     // ── Player ──────────────────────────────────────────────────
     const player = {
